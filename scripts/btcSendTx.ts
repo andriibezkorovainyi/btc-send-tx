@@ -2,44 +2,61 @@ import * as bitcoin from "bitcoinjs-lib";
 import ECPairFactory from "ecpair";
 import * as ecc from "tiny-secp256k1";
 import axios from "axios";
+import { config } from "dotenv";
+config();
 
 // npx ts-node scripts/btcSendTx.ts
 const ECPair = ECPairFactory(ecc);
 const MAINNET = bitcoin.networks.bitcoin;
 
-async function getLastTxHash(address: string) {
-  const response = await axios.get(
-    `https://blockchain.info/rawaddr/${address}`
-  );
-  if (response.status === 200) {
-    return response.data.txs[0].hash;
-  } else {
-    console.error("Address data error");
+async function getUTXO(address: string) {
+  const config = {
+    method: "get",
+    maxBodyLength: Infinity,
+    url: `https://btcbook.nownodes.io/api/v2/utxo//${address}`,
+    headers: {
+      "api-key": <string>process.env.API_KEY,
+    },
+  };
+
+  try {
+    const response = await axios(config);
+    // console.log(response.data);
+    return response.data[0];
+  } catch (error) {
+    console.log(error);
+    throw error;
   }
 }
 
 async function sendBitcoin(
   fromPrivateKey: string,
-  fromAddress: string,
-  toPublicKey: string,
   toAddress: string,
   amount: number
 ) {
-  const keyPair = ECPair.fromWIF(fromPrivateKey);
+  const keyPair = ECPair.fromWIF(fromPrivateKey, MAINNET);
   const psbt = new bitcoin.Psbt({ network: MAINNET });
 
-  const lastTxHash = await getLastTxHash(fromAddress);
+  const { address } = bitcoin.payments.p2wpkh({
+    pubkey: keyPair.publicKey,
+    network: MAINNET,
+  });
 
-  const inputDataTest = {
-    hash: lastTxHash,
-    index: 0,
+  const txUtxo = await getUTXO(address!);
+
+  const inputData = {
+    hash: txUtxo.txid,
+    index: txUtxo.vout,
     witnessUtxo: {
-      script: Buffer.from(toPublicKey, "hex"),
-      value: amount,
+      script: Buffer.from(
+        "76a9148bbc95d2709c71607c60ee3f097c1217482f518d88ac",
+        "hex"
+      ),
+      value: 49420,
     },
   };
 
-  psbt.addInput(inputDataTest);
+  psbt.addInput(inputData);
   psbt.addOutput({ address: toAddress, value: amount });
 
   psbt.signInput(0, keyPair);
@@ -49,10 +66,8 @@ async function sendBitcoin(
   console.log("Signed tx:", hex);
 }
 
-const fromPrivKey = "";
-const fromAddress = "bc1qvz6cpy0wyf2lverenjjy64easzudsmajxucsyw";
-const toPublicKey = "037d76ad0083bd5d5cc889a4e74e230a2851e63bc24f3382e99768cbeb2ecf4beb";
+const fromPrivKey = <string>process.env.PRIVATE_KEY;
 const toAddress = "bc1qc56rfsnvc20fv67mve6efg8tn87f6ah4pzcypf";
 const amount = 10000;
 
-sendBitcoin(fromPrivKey, fromAddress, toPublicKey, toAddress, amount);
+sendBitcoin(fromPrivKey, toAddress, amount);
