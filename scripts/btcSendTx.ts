@@ -1,73 +1,113 @@
-import * as bitcoin from "bitcoinjs-lib";
-import ECPairFactory from "ecpair";
-import * as ecc from "tiny-secp256k1";
 import axios from "axios";
 import { config } from "dotenv";
+import { mempoolInit} from "./mempoolAPI";
 config();
 
-// npx ts-node scripts/btcSendTx.ts
-const ECPair = ECPairFactory(ecc);
-const MAINNET = bitcoin.networks.bitcoin;
+const {Network, Output, Coin, MTX, KeyRing, WalletDB, TX, Amount} = require("bcoin");
+const network = Network.get(process.env.NETWORK!);
+const mempoolClient = mempoolInit(network.type);
+const walletName = process.env.WALLET_NAME!;
 
-async function getUTXO(address: string) {
-  const config = {
-    method: "get",
-    maxBodyLength: Infinity,
-    url: `https://btcbook.nownodes.io/api/v2/utxo//${address}`,
-    headers: {
-      "api-key": <string>process.env.API_KEY,
-    },
-  };
+async function pushTx(rawTx: string) {
+    try {
+        const prefix = network.type === "testnet" ? "test3" : "main";
+        const {data} = await axios.post(`https://api.blockcypher.com/v1/btc/${prefix}/txs/push`, {tx: rawTx});
+        return data;
+    } catch (error: any) {
+        console.log(error.message);
+    }
+}
 
-  try {
-    const response = await axios(config);
-    // console.log(response.data);
-    return response.data[0];
-  } catch (error) {
-    console.log(error);
-    throw error;
-  }
+async function walletInit(privateKey: string) {
+    const walletDB = new WalletDB({ db: 'memory', network });
+    await walletDB.open();
+    let wallet = await walletDB.get(walletName);
+
+    if (!wallet) {
+        wallet = await walletDB.create({
+            id: walletName,
+            master: Buffer.from(privateKey, 'hex').toString(),
+        });
+    }
+
+    return wallet;
+}
+
+async function coinsFromUtxo(utxo: any, amount: number, rate: number) {
+    const coins = [];
+    let totalAmount = 0;
+
+    for (const u of utxo) {
+        if (!u.status.confirmed) continue;
+
+        const txHex = await mempoolClient.transactions.getTxHex({ txid: u.txid });
+        const tx = TX.fromRaw(Buffer.from(txHex, "hex"));
+        const coin = Coin.fromTX(tx, u.vout, u.status.block_height);
+        if (coin.isDust(rate)) { console.log(`UTXO ${u.txid} is Dust!`); continue; }
+
+        coins.push(coin);
+        totalAmount += u.value;
+
+        if (totalAmount >= amount * 2) break; // Если сумма собранных UTXO в два раза больше суммы перевода, значит на комиссию точно хватит. Лучшее что придумал
+    }
+
+    return coins;
 }
 
 async function sendBitcoin(
-  fromPrivateKey: string,
-  toAddress: string,
-  amount: number
+    sendTo: string,
+    sendFrom: string = process.env.SEND_FROM!,
+    privateKey: string = process.env.PRIVATE_KEY!,
+    amount: number,
 ) {
-  const keyPair = ECPair.fromWIF(fromPrivateKey, MAINNET);
-  const psbt = new bitcoin.Psbt({ network: MAINNET });
+    const wallet = await walletInit(privateKey);
+    const rate = (await mempoolClient.fees.getFeesRecommended()).halfHourFee * 1000; // Средний приоритет, в sat/KB
 
-  const { address } = bitcoin.payments.p2wpkh({
-    pubkey: keyPair.publicKey,
-    network: MAINNET,
-  });
+    const utxo = await mempoolClient.addresses.getAddressTxsUtxo({ address: sendFrom });
+    if (!utxo.length) throw new Error('No UTXO found.');
 
-  const txUtxo = await getUTXO(address!);
+    const coins = await coinsFromUtxo(utxo, amount, rate);
+    if (coins.length === 0) throw new Error('No spendable UTXO found.');
 
-  const inputData = {
-    hash: txUtxo.txid,
-    index: txUtxo.vout,
-    witnessUtxo: {
-      script: Buffer.from(
-        "76a9148bbc95d2709c71607c60ee3f097c1217482f518d88ac",
-        "hex"
-      ),
-      value: 49420,
-    },
-  };
+    const keyRing = await KeyRing.fromSecret(privateKey, network);
+    keyRing.witness = coins[0].type === 'witnesspubkeyhash';
 
-  psbt.addInput(inputData);
-  psbt.addOutput({ address: toAddress, value: amount });
+    const mtx = new MTX();
 
-  psbt.signInput(0, keyPair);
-  psbt.finalizeAllInputs();
+    const output = new Output({
+        address: sendTo,
+        value: amount
+    });
 
-  const hex = psbt.extractTransaction().toHex();
-  console.log("Signed tx:", hex);
+    if (output.isDust()) throw new Error('Output is dust.');
+
+    mtx.outputs.push(output);
+
+    await mtx.fund(coins, {
+        rate,
+        changeAddress: sendFrom,
+        getAccount: wallet.getAccount.bind(wallet),
+    });
+
+    await mtx.sign(keyRing);
+
+    if (!(await mtx.verify())) throw new Error('Signature failed to verify.');
+
+    const rawTx = mtx.toRaw().toString('hex');
+
+    console.log(rawTx);
+    // const tx = await mempoolClient.transactions.postTx({ tx: rawTx });
+    const tx = await pushTx(rawTx);
+    console.log(tx);
 }
 
-const fromPrivKey = <string>process.env.PRIVATE_KEY;
-const toAddress = "bc1qc56rfsnvc20fv67mve6efg8tn87f6ah4pzcypf";
-const amount = 10000;
+const toSatoshi = (amount: number) => +Amount.fromBTC(amount).toSatoshis(true);
+const toBtc = (amount: number) => +Amount.btc(amount, true);
 
-sendBitcoin(fromPrivKey, toAddress, amount);
+const sendTo = "";
+const sendFrom = "";
+const privateKey = process.env.PRIVATE_KEY!;
+const amount = 20000;
+
+sendBitcoin(sendTo, sendFrom, privateKey, amount);
+

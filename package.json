@@ -7,10 +7,8 @@
   "dependencies": {
     "@mempool/mempool.js": "^2.3.0",
     "axios": "^1.6.2",
-    "bitcoinjs-lib": "^5.2.0",
+    "bcoin": "git://github.com/bcoin-org/bcoin.git",
     "dotenv": "^16.3.1",
-    "ecpair": "^2.1.0",
-    "send-crypto": "^0.2.38",
-    "tiny-secp256k1": "^2.2.3"
+    "send-crypto": "^0.2.38"
   }
 }

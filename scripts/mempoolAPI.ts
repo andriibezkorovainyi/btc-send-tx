@@ -1,17 +1,14 @@
 import mempoolJS from "@mempool/mempool.js";
 
 // npx ts-node scripts/mempoolAPI.ts
-const init = async () => {
+export const mempoolInit = (network: string) => {
   const {
-    bitcoin: { addresses },
+    bitcoin: { addresses, transactions, fees },
   } = mempoolJS({
     hostname: "mempool.space",
+    network,
   });
 
-  const address = "bc1qvz6cpy0wyf2lverenjjy64easzudsmajxucsyw";
-  const addressTxsUtxo = await addresses.getAddressTxsUtxo({ address });
-  console.log(addressTxsUtxo);
+  return { addresses, transactions, fees };
 };
-
-init();
 
